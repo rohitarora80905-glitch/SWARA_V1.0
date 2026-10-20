@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +36,8 @@ from server import load_users, save_user                       # noqa: E402
 from webapp import tools                                       # noqa: E402
 from webapp.lab import LabManager, pcm_to_wav                  # noqa: E402
 from webapp.relay import ExperimentJob, RelayManager           # noqa: E402
+from webapp.softphone import AGENTS, PhoneAgent                # noqa: E402
+from webapp.tls import ensure_cert, lan_ip                     # noqa: E402
 
 FIG_DIR = os.path.join(BASE_DIR, "figures")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -43,8 +45,10 @@ RESULTS_FILE = os.path.join(BASE_DIR, "experiments", "results.json")
 USERS_FILE = os.path.join(BASE_DIR, server_mod.USERS_FILE)
 RUNTIME_DIR = os.path.join(BASE_DIR, "runtime")
 UPLOAD_DIR = os.path.join(RUNTIME_DIR, "uploads")
+TLS_DIR = os.path.join(RUNTIME_DIR, "tls")
 LAB_USERS_FILE = os.path.join(RUNTIME_DIR, "lab_users.json")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+HTTPS_PORT = int(os.environ.get("SWARA_HTTPS_PORT", "0"))     # set by the launcher / __main__
 
 RELAY_PORT = int(os.environ.get("SWARA_RELAY_PORT", "9000"))
 RELAY_AUTOSTART = os.environ.get("SWARA_RELAY_AUTOSTART", "1") != "0"
@@ -248,7 +252,79 @@ def api_status():
         "experiments": {"running": experiments.running},
         "audio_backends": lab.audio_backends(),
         "results_available": os.path.exists(RESULTS_FILE),
+        "phones": [a.describe() for a in list(AGENTS)],
+        "https_port": HTTPS_PORT or None,
+        "lan_ip": lan_ip(),
     }
+
+
+# ===========================================================================
+# Softphone: a person in a browser, a real SWARA client in this process
+# ===========================================================================
+@app.get("/api/phone/defaults", summary="Defaults for the Softphone page", tags=["Softphone"])
+def phone_defaults():
+    return {
+        "relay": f"127.0.0.1:{relay.port}" if relay.running else "127.0.0.1:9000",
+        "relay_running": relay.running,
+        "device_audio": lab.audio_backends().get("live", False),
+        "users": list(load_users(USERS_FILE)),
+        "lan_ip": lan_ip(),
+        "https_port": HTTPS_PORT or None,
+        "secure": True,
+    }
+
+
+@app.websocket("/ws/phone")
+async def ws_phone(ws: WebSocket):
+    """One browser tab = one agent.  Text frames carry JSON commands and events;
+    binary frames carry 16 kHz int16 PCM in both directions."""
+    await ws.accept()
+    loop = asyncio.get_running_loop()
+    outq: asyncio.Queue = asyncio.Queue()
+    agent: PhoneAgent | None = None
+
+    async def pump():
+        while True:
+            item = await outq.get()
+            if isinstance(item, (bytes, bytearray)):
+                await ws.send_bytes(item)
+            else:
+                await ws.send_text(item)
+
+    sender = asyncio.create_task(pump())
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("bytes"):
+                if agent is not None:
+                    agent.push_audio(msg["bytes"])
+                continue
+            text = msg.get("text")
+            if not text:
+                continue
+            try:
+                cmd = json.loads(text)
+            except ValueError:
+                continue
+            if cmd.get("op") == "login":
+                if agent is not None and agent.alive():
+                    await ws.send_text(json.dumps({"op": "error", "msg": "already signed in on this connection"}))
+                    continue
+                try:
+                    agent = PhoneAgent(cmd, loop, outq)
+                    agent.start()
+                except ValueError as e:
+                    await ws.send_text(json.dumps({"op": "error", "msg": str(e), "fatal": True}))
+            elif agent is not None:
+                agent.command(cmd)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        sender.cancel()
+        if agent is not None:
+            agent.stop()
 
 
 @app.get("/api/system", summary="Runtime, packages and module inventory", tags=["System"])
@@ -594,10 +670,38 @@ async def unhandled(_req: Request, exc: Exception):
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Serve HTTP (and, unless disabled, HTTPS on a second port for phones and
+    other devices, whose browsers allow the microphone only on secure origins)."""
+    import argparse
+    import threading
+
     import uvicorn
-    port = int(os.environ.get("PORT", "8000"))
-    print(f"\n  SWARA console   http://localhost:{port}/\n"
-          f"  API docs        http://localhost:{port}/docs\n"
-          f"  UDP relay       udp://0.0.0.0:{RELAY_PORT}\n")
-    uvicorn.run("api_server:app", host="0.0.0.0", port=port, reload=False)
+
+    ap = argparse.ArgumentParser(description="SWARA web console")
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
+    ap.add_argument("--https-port", type=int, default=8443, help="0 disables the HTTPS listener")
+    a = ap.parse_args()
+
+    global HTTPS_PORT
+    https_line = ""
+    if a.https_port:
+        try:
+            cert, key = ensure_cert(TLS_DIR)
+            scfg = uvicorn.Config(app, host=a.host, port=a.https_port, ssl_certfile=cert, ssl_keyfile=key,
+                                  log_level="info")
+            threading.Thread(target=uvicorn.Server(scfg).run, name="https", daemon=True).start()
+            HTTPS_PORT = a.https_port
+            https_line = f"  Share link      https://{lan_ip()}:{a.https_port}/   (other devices; accept the certificate warning)\n"
+        except Exception as e:                      # HTTPS is a convenience, never fatal
+            print(f"  HTTPS disabled: {e}")
+    print(f"\n  SWARA console   http://localhost:{a.port}/\n"
+          f"  On the network  http://{lan_ip()}:{a.port}/\n{https_line}"
+          f"  API docs        http://localhost:{a.port}/docs\n"
+          f"  UDP relay       udp://0.0.0.0:{RELAY_PORT}\n", flush=True)
+    uvicorn.Server(uvicorn.Config(app, host=a.host, port=a.port, log_level="info")).run()
+
+
+if __name__ == "__main__":
+    main()

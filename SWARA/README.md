@@ -70,7 +70,8 @@ python3 experiments/run_all.py       # ~3 min, regenerates all 8 figures
 
 ```bash
 pip install -r requirements.txt
-python -m uvicorn api_server:app --host 0.0.0.0 --port 8000      # or: python api_server.py
+python api_server.py        # HTTP on 8000, an HTTPS share link on 8443, the UDP relay on 9000
+# HTTP only: python -m uvicorn api_server:app --host 0.0.0.0 --port 8000
 ```
 
 Open **http://localhost:8000** (on Windows, `start_console.bat` does both steps).
@@ -83,6 +84,7 @@ can connect to it while the console watches. Swagger docs live at `/docs`.
 
 | Page | What it does |
 |---|---|
+| **Softphone** | Sign in to a relay with your microphone and call another signed-in person — on this computer, on a friend's computer running the same console, or from a phone via the HTTPS share link. Live MOS, loss after repair, FEC / replica / concealment counts, mid-call network impairment, mute, hang up, and a call report. |
 | Live Call Lab | A real instrumented call (relay + SPARK + AEAD over UDP) streamed to the browser: per-frame fate map, live charts, listen live, change the network mid-call, compare sent vs received audio. Can use your own recorded voice. |
 | A/B Benchmark | The same call under SWARA, uniform FEC and no protection over an identical channel, with charts, a table and audio for each arm. |
 | Network Simulator | The offline engine (`swara/engine.py`) on demand, with named profiles and a loss sweep. |
@@ -90,8 +92,29 @@ can connect to it while the console watches. Swagger docs live at `/docs`.
 | Protocol toolkit | Perceptual analyser, Reed–Solomon playground, PI-AFEC scheduler, E-model and NAVIK explorer, SPARK handshake, packet anatomy, SETU overlay. |
 | Relay & Users | Hosted relay status, online users, active calls, log; register and delete users. |
 
-Environment: `SWARA_RELAY_PORT` (default 9000), `SWARA_RELAY_AUTOSTART=0` to not start the relay.
-Runtime files (lab credentials, uploaded clips) go in `runtime/`.
+Environment: `SWARA_RELAY_PORT` (default 9000), `SWARA_RELAY_AUTOSTART=0` to not start the relay;
+`python api_server.py --https-port 0` turns the HTTPS listener off.
+Runtime files (lab credentials, uploaded clips, the self-signed certificate) go in `runtime/`.
+
+### A live call between two computers, all in the browser
+
+1. **Host (your PC):** double-click `SWARA Server.bat`. The window starts the console, the UDP
+   relay (`udp:9000`) and shows an HTTPS share link such as `https://192.168.1.20:8443/`. Allow
+   Python through the Windows firewall when asked. Open the console → **Softphone** → sign in
+   (for example `alice` / `secret1`).
+2. **Friend, option A — nothing to install:** on the same Wi-Fi, open the host's **https://** share
+   link on a phone or laptop, accept the certificate warning once (the certificate is self-signed),
+   go to **Softphone**, leave the relay as `127.0.0.1:9000` (that is the host's relay, because the
+   call runs inside the host) and sign in as `bob` / `secret2`.
+   **Friend, option B — real PC-to-PC UDP:** run the same console on the friend's PC
+   (`SWARA Server.bat`), open `http://localhost:8000` → **Softphone**, set the relay address to the
+   host's IP, e.g. `192.168.1.20:9000`, and sign in as `bob`.
+3. Either side clicks **Call** next to the other's name; incoming calls are answered automatically.
+   Earphones on both sides avoid feedback. Drag the network sliders during the call to show the
+   protection working, or sign in with *Loss protection: None* to hear the difference.
+
+Register more users on **Relay & Users** — the registry is the host's `users.json`. Browsers allow
+the microphone only on `localhost` or over HTTPS, which is why other devices must use the share link.
 
 ## Modules
 

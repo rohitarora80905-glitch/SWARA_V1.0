@@ -277,16 +277,21 @@
     new Int16Array(buf, 44).set(int16);
     return new Blob([buf], { type: "audio/wav" });
   };
-  // Plays a stream of 16 kHz int16 chunks gaplessly, for "listen live".
+  // One AudioContext for the whole console (created on a user gesture).
+  SW.audioContext = () => (SW._actx || (SW._actx = new (window.AudioContext || window.webkitAudioContext)()));
+  // Plays a stream of 16 kHz int16 chunks gaplessly, for "listen live" and the softphone.
   SW.PcmPlayer = class {
-    constructor() { this.ctx = null; this.t = 0; this.on = false; this.gain = null; }
+    constructor() { this.ctx = null; this.t = 0; this.on = false; this.gain = null; this.level = 0; }
     async enable() {
-      if (!this.ctx) { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); this.gain = this.ctx.createGain(); this.gain.connect(this.ctx.destination); }
+      if (!this.ctx) { this.ctx = SW.audioContext(); this.gain = this.ctx.createGain(); this.gain.connect(this.ctx.destination); }
       await this.ctx.resume(); this.on = true; this.t = 0;
     }
-    disable() { this.on = false; }
+    disable() { this.on = false; this.level = 0; }
     push(int16) {
       if (!this.on || !this.ctx || !int16.length) return;
+      let acc = 0; const n = Math.min(320, int16.length);
+      for (let i = 0; i < n; i++) { const v = int16[i] / 32768; acc += v * v; }
+      this.level = Math.sqrt(acc / n);
       const b = this.ctx.createBuffer(1, int16.length, 16000), ch = b.getChannelData(0);
       for (let i = 0; i < int16.length; i++) ch[i] = int16[i] / 32768;
       const s = this.ctx.createBufferSource(); s.buffer = b; s.connect(this.gain);
@@ -311,6 +316,41 @@
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     try { return await SW.toPcm16k(await ctx.decodeAudioData(await file.arrayBuffer())); }
     finally { ctx.close(); }
+  };
+  // Streams the microphone as 16 kHz int16 PCM chunks (for the softphone).
+  // Resampling is done here with linear interpolation so the server receives
+  // exactly the rate the codec wants, whatever the device runs at.
+  SW.MicStream = class {
+    constructor() { this.muted = false; this.sending = false; this.level = 0; }
+    async start(onChunk) {
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      this.ctx = SW.audioContext();
+      await this.ctx.resume();
+      this.src = this.ctx.createMediaStreamSource(this.stream);
+      this.node = this.ctx.createScriptProcessor(1024, 1, 1);
+      this.sink = this.ctx.createGain(); this.sink.gain.value = 0;          // the processor only runs when connected
+      this.ratio = this.ctx.sampleRate / 16000; this.carry = 0; this.pos = 1;
+      this.node.onaudioprocess = (e) => {
+        const d = e.inputBuffer.getChannelData(0), N = d.length;
+        let s = 0; for (let i = 0; i < N; i++) s += d[i] * d[i];
+        this.level = this.muted ? 0 : Math.sqrt(s / N);
+        const x = (i) => (i <= 0 ? this.carry : d[i - 1]);           // x[0] = last sample of the previous block
+        const out = [];
+        let p = this.pos;
+        while (p <= N) { const i0 = Math.floor(p), f = p - i0, a = x(i0), b = i0 + 1 <= N ? x(i0 + 1) : a; out.push(a + (b - a) * f); p += this.ratio; }
+        this.pos = p - N; this.carry = d[N - 1];
+        if (!this.sending) return;
+        const pcm = new Int16Array(out.length);
+        if (!this.muted) for (let i = 0; i < out.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, Math.round(out[i] * 32767)));
+        onChunk(pcm);
+      };
+      this.src.connect(this.node); this.node.connect(this.sink); this.sink.connect(this.ctx.destination);
+    }
+    stop() {
+      this.sending = false;
+      try { this.node && this.node.disconnect(); this.src && this.src.disconnect(); this.sink && this.sink.disconnect(); } catch {}
+      try { this.stream && this.stream.getTracks().forEach((t) => t.stop()); } catch {}
+    }
   };
   SW.Recorder = class {
     async start(onLevel) {

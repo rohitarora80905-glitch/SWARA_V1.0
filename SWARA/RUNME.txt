@@ -10,6 +10,16 @@ STEP 1b — the web console (recommended)
    then open http://localhost:8000   (Windows: double-click start_console.bat)
    or double-click "SWARA Server.bat" for a window with Start / Stop buttons
 
+STEP 1c — a live call between two laptops, all in the browser
+   Host:   double-click "SWARA Server.bat", open the console, go to Softphone,
+           sign in as alice / secret1.
+   Friend: on the same Wi-Fi, open the host's https://<host-ip>:8443/ link (shown in
+           the host's window), accept the certificate warning, go to Softphone and
+           sign in as bob / secret2.  A phone works too.
+           (Or run the same console on the friend's laptop, and in Softphone set the
+           relay address to <host-ip>:9000 for real laptop-to-laptop UDP.)
+   Either side clicks Call next to the other's name.  Use earphones.
+
 STEP 2 — run the demo (no second laptop, no microphone needed)
    python3 demo.py --seconds 20
 

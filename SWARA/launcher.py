@@ -99,8 +99,8 @@ class Launcher(tk.Tk):
         super().__init__()
         self.title("SWARA Server Control")
         self.configure(bg=BG)
-        self.geometry("880x640")
-        self.minsize(760, 540)
+        self.geometry("980x700")
+        self.minsize(860, 600)
         try:
             self.iconphoto(True, self._icon())
         except Exception:
@@ -175,7 +175,7 @@ class Launcher(tk.Tk):
 
         top = ttk.Frame(self, padding=(20, 4, 20, 8))
         top.grid(row=1, column=0, sticky="ew")
-        top.columnconfigure(0, weight=3)
+        top.columnconfigure(0, weight=3, minsize=470)
         top.columnconfigure(1, weight=2)
 
         # status card
@@ -189,14 +189,16 @@ class Launcher(tk.Tk):
         self.status_lbl = ttk.Label(row, text="Stopped", style="Big.TLabel")
         self.status_lbl.pack(side="left", padx=(8, 0))
         self.kv = {}
-        for i, (k, label) in enumerate((("url", "Console"), ("lan", "On your network"), ("relay", "UDP relay"),
-                                        ("engine", "Call engine"), ("uptime", "Uptime"))):
+        for i, (k, label) in enumerate((("url", "Console"), ("lan", "On your network"), ("share", "Share link (HTTPS)"),
+                                        ("relay", "UDP relay"), ("engine", "Call engine"), ("uptime", "Uptime"))):
+            links = k in ("url", "lan", "share")
             ttk.Label(sc, text=label, style="Muted.TLabel").grid(row=i + 1, column=0, sticky="w", padx=16, pady=2)
-            v = ttk.Label(sc, text="—", style="Link.TLabel" if k in ("url", "lan") else "Value.TLabel", cursor="hand2" if k in ("url", "lan") else "")
+            v = ttk.Label(sc, text="—", style="Link.TLabel" if links else "Value.TLabel", cursor="hand2" if links else "")
             v.grid(row=i + 1, column=1, sticky="w", padx=(10, 16), pady=2)
             self.kv[k] = v
         self.kv["url"].bind("<Button-1>", lambda e: self.open_console())
         self.kv["lan"].bind("<Button-1>", lambda e: self._copy(self.kv["lan"].cget("text")))
+        self.kv["share"].bind("<Button-1>", lambda e: self._copy(self.kv["share"].cget("text")))
         tk.Frame(sc, bg=PANEL, height=12).grid(row=9, column=0)
 
         # settings card
@@ -205,18 +207,22 @@ class Launcher(tk.Tk):
         ttk.Label(cc, text="Settings", style="Card.TLabel", font=(FONT, 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 8))
         self.web_port = tk.StringVar(value=str(self.settings.get("web_port", 8000)))
         self.relay_port = tk.StringVar(value=str(self.settings.get("relay_port", 9000)))
+        self.https_port = tk.StringVar(value=str(self.settings.get("https_port", 8443)))
+        self.https_on = tk.BooleanVar(value=self.settings.get("https_on", True))
         self.relay_auto = tk.BooleanVar(value=self.settings.get("relay_auto", True))
         self.open_browser = tk.BooleanVar(value=self.settings.get("open_browser", True))
         self.autostart = tk.BooleanVar(value=self.settings.get("autostart", True))
-        for i, (label, var) in enumerate((("Web console port (HTTP)", self.web_port), ("Relay port (UDP)", self.relay_port))):
-            ttk.Label(cc, text=label, style="Muted.TLabel").grid(row=i + 1, column=0, sticky="w", padx=16, pady=4)
+        for i, (label, var) in enumerate((("Web console port (HTTP)", self.web_port), ("Relay port (UDP)", self.relay_port),
+                                          ("Share port (HTTPS)", self.https_port))):
+            ttk.Label(cc, text=label, style="Muted.TLabel").grid(row=i + 1, column=0, sticky="w", padx=16, pady=3)
             e = ttk.Entry(cc, textvariable=var, width=8)
-            e.grid(row=i + 1, column=1, sticky="e", padx=16, pady=4)
+            e.grid(row=i + 1, column=1, sticky="e", padx=16, pady=3)
             setattr(self, f"entry{i}", e)
-        for i, (label, var) in enumerate((("Start the UDP relay with the server", self.relay_auto),
+        for i, (label, var) in enumerate((("HTTPS share link (other devices need it for the mic)", self.https_on),
+                                          ("Start the UDP relay with the server", self.relay_auto),
                                           ("Open the browser when ready", self.open_browser),
                                           ("Start the server when this window opens", self.autostart))):
-            ttk.Checkbutton(cc, text=label, variable=var, command=self._save_settings).grid(row=i + 3, column=0, columnspan=2, sticky="w", padx=14, pady=2)
+            ttk.Checkbutton(cc, text=label, variable=var, command=self._save_settings).grid(row=i + 4, column=0, columnspan=2, sticky="w", padx=14, pady=1)
 
         # buttons
         bar = ttk.Frame(self, padding=(20, 6, 20, 8))
@@ -263,6 +269,7 @@ class Launcher(tk.Tk):
     def _save_settings(self):
         os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
         data = {"web_port": self._port(self.web_port, 8000), "relay_port": self._port(self.relay_port, 9000),
+                "https_port": self._port(self.https_port, 8443), "https_on": self.https_on.get(),
                 "relay_auto": self.relay_auto.get(), "open_browser": self.open_browser.get(),
                 "autostart": self.autostart.get()}
         try:
@@ -328,16 +335,31 @@ class Launcher(tk.Tk):
             self._say(f"port {port} is used by another program; using port {free} instead", "warn")
             port = free
             self.web_port.set(str(port))
+        # A server that was just stopped releases its ports within a second or two;
+        # wait for that before concluding the port belongs to someone else.
+        for _ in range(8):
+            if not self.relay_auto.get() or udp_free(rport):
+                break
+            time.sleep(0.5)
         if self.relay_auto.get() and not udp_free(rport):
             free = next_free(rport + 1, udp_free)
             if free is not None:
                 self._say(f"UDP port {rport} is in use; the relay will listen on udp:{free} instead", "warn")
                 rport = free
                 self.relay_port.set(str(rport))
+        hport = 0
+        if self.https_on.get():
+            hport = self._port(self.https_port, 8443)
+            if not tcp_free(hport):
+                free = next_free(hport + 1, tcp_free)
+                if free is not None:
+                    self._say(f"port {hport} is in use; HTTPS will use port {free} instead", "warn")
+                    hport = free
+                    self.https_port.set(str(hport))
         self._save_settings()
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
                    SWARA_RELAY_PORT=str(rport), SWARA_RELAY_AUTOSTART="1" if self.relay_auto.get() else "0")
-        cmd = [server_python(), "-m", "uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", str(port)]
+        cmd = [server_python(), "api_server.py", "--host", "0.0.0.0", "--port", str(port), "--https-port", str(hport)]
         flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
         try:
             self.proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -454,13 +476,18 @@ class Launcher(tk.Tk):
             r = st.get("relay", {})
             self.kv["relay"].configure(text=(f"udp:{r.get('port')} · {r.get('online', 0)} online · {r.get('calls', 0)} calls"
                                              if r.get("running") else (r.get("error") or "not running")))
+            hp = st.get("https_port")
+            self.kv["share"].configure(text=f"https://{st.get('lan_ip') or lan_ip()}:{hp}/" if hp else "off")
             lab = st.get("lab", {})
+            phones = st.get("phones") or []
             self.kv["engine"].configure(text=(f"{lab.get('kind')} · {lab.get('phase')}" if lab.get("busy")
-                                              else "experiments running" if st.get("experiments", {}).get("running") else "idle"))
+                                              else "experiments running" if st.get("experiments", {}).get("running")
+                                              else (f"{len(phones)} softphone(s): " + ", ".join(f"{p['user']} ({p['state']})" for p in phones[:4]))
+                                              if phones else "idle"))
             up = st.get("uptime_s", 0)
             self.kv["uptime"].configure(text=f"{int(up // 3600)}h {int(up % 3600 // 60)}m {int(up % 60)}s")
         elif not live:
-            for k in ("relay", "engine", "uptime"):
+            for k in ("share", "relay", "engine", "uptime"):
                 self.kv[k].configure(text="—")
         running_own = self.proc is not None and self.proc.poll() is None
         self.b_start.state(["disabled"] if running_own or self.state in ("external", "starting", "stopping") else ["!disabled"])
@@ -468,7 +495,7 @@ class Launcher(tk.Tk):
         self.b_restart.state(["!disabled"] if running_own and self.state == "running" else ["disabled"])
         self.b_open.state(["!disabled"] if live else ["disabled"])
         self.b_docs.state(["!disabled"] if live else ["disabled"])
-        for e in (self.entry0, self.entry1):
+        for e in (self.entry0, self.entry1, self.entry2):
             e.state(["disabled"] if running_own or self.state == "external" else ["!disabled"])
 
 

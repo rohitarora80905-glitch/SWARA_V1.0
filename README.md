@@ -19,10 +19,12 @@ The code, documentation and evaluation live in [`SWARA/`](SWARA/):
 ```bash
 cd SWARA
 pip install -r requirements.txt
-python -m uvicorn api_server:app --port 8000     # web console at http://localhost:8000
+python api_server.py             # web console at http://localhost:8000, UDP relay on 9000
 ```
 
 On Windows, double-click `SWARA/SWARA Server.bat` for a start/stop window instead of a terminal.
+Open **Softphone** in the console to call another person — on a friend's PC running the same
+console, or on a phone that opens the console's `https://` share link.
 
 For a terminal-only demonstration (no web console, no second machine, no microphone):
 
@@ -33,9 +35,9 @@ python demo.py --seconds 20 --loss 0.15 --burst 4 --compare
 
 ## What's inside
 
-- **Web console** (`api_server.py`, `webapp/`, `static/`) — live instrumented calls, an A/B
-  benchmark against uniform FEC and unprotected UDP, an offline network simulator,
-  interactive research results and a protocol toolkit.
+- **Web console** (`api_server.py`, `webapp/`, `static/`) — a browser softphone for real calls
+  between people, live instrumented calls, an A/B benchmark against uniform FEC and unprotected
+  UDP, an offline network simulator, interactive research results and a protocol toolkit.
 - **Voice application** (`client.py`, `server.py`) — the actual client and relay server.
 - **Protocol library** (`swara/`) — codec, perceptual analyser, Reed–Solomon FEC scheduler,
   SPARK authentication, NAVIK controller, jitter buffer, E-model, SETU overlay.

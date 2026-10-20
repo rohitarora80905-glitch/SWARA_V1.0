@@ -4,4 +4,4 @@ cd /d "%~dp0"
 set PY=python
 if exist "..\.venv\Scripts\python.exe" set PY=..\.venv\Scripts\python.exe
 start "" http://localhost:8000/
-"%PY%" -m uvicorn api_server:app --host 0.0.0.0 --port 8000
+"%PY%" api_server.py --host 0.0.0.0 --port 8000 --https-port 8443
